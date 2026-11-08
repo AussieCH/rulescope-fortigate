@@ -4,6 +4,11 @@ FortiGate security audit, best-practice baseline, rule base cleanup and change c
 
 One firewall or a whole fleet, from the live REST API or from a config backup a client emails you.
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/report-overview-dark.png">
+  <img alt="Audit report overview: security score, high-severity findings, internet exposure, firmware, best-practice baseline, quick wins and cleanup potential" src="docs/images/report-overview.png">
+</picture>
+
 ## What it finds
 
 | Area | Checks |
@@ -21,6 +26,15 @@ One firewall or a whole fleet, from the live REST API or from a config backup a 
 Every finding maps to CIS FortiGate 7.0.x v1.4.0, ISO 27001:2022, PCI DSS 4.0 and NIST SP 800-53 r5 controls (indicative, for auditors), and carries an effort tag: quick fix, change window or project.
 
 Outputs: client-ready HTML report (key tiles, executive summary, priority actions, quick wins, best-practice baseline, exposure map, firmware and advisories, compliance appendix), FortiOS remediation script, CSV for Excel (findings and baseline), JSON, change reports with who-changed-what, and a fleet dashboard. Every page has light and dark modes and five color palettes (Harbor, Forest, Ocean, Graphite, High contrast) that readers can switch; printing always uses the light variant.
+
+## Screenshots
+
+All screenshots come from the demo site in [`examples/demo-site`](examples/demo-site) (three made-up firewalls; addresses are documentation ranges).
+
+| | |
+|---|---|
+| **Internet exposure**: every service reachable from the internet, with who can reach it and what protects it<br><img alt="Internet exposure table" src="docs/images/report-exposure.png"> | **Best-practice baseline**: 37 practices with the evidence from this configuration<br><img alt="Best-practice baseline with pass and fail status" src="docs/images/report-practices.png"> |
+| **Fleet dashboard**: score, firmware status and risky changes for every device<br><img alt="Fleet dashboard" src="docs/images/fleet-dashboard.png"> | **Change report**: what changed since the last snapshot, with alerts for risky changes<br><img alt="Configuration change report with alerts" src="docs/images/change-report.png"> |
 
 ## Install
 
