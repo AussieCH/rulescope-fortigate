@@ -1,0 +1,29 @@
+# rulescope fleet inventory. Values in [DEFAULT] apply to every device.
+# Each section is one device; 'vdom' may list several VDOMs (one report each).
+# Firmware advisories, palette and lifecycle dates are command-line options of 'rulescope fleet':
+#   rulescope fleet --inventory fleet.ini --out site --advisories online --palette harbor
+
+[DEFAULT]
+token_file = /etc/rulescope/token
+insecure = yes          ; self-signed admin certificate (use ca_file = ... once you have a proper CA)
+timeout = 30
+
+[HQ-FW]
+host = 192.0.2.1
+label = Headquarters
+group = Core
+vdom = root
+not_wan = port10, QinQ-V10 ; default route points to an upstream internal network, not the internet
+
+[Branch-North]
+host = 192.0.2.21:8443  ; admin HTTPS on a non-default port
+label = Branch North
+group = Branches
+token_env = BRANCH_TOKEN ; token from an environment variable instead of the default file
+
+[Customer-X-offline]
+config = /audits/customer-x/FGT_backup.conf
+usage = /audits/customer-x/hits.csv
+usage_since = 2026-08-01
+label = Customer X (offline)
+group = Customers

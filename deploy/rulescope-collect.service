@@ -1,0 +1,16 @@
+[Unit]
+Description=rulescope FortiGate snapshot and change diff
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=rulescope
+Group=rulescope
+# Edit the host. Add --port, --vdom or --ca-file as needed.
+ExecStart=/usr/local/bin/rulescope collect --host 192.168.1.99 --token-file /etc/rulescope/token --insecure --out /var/lib/rulescope/snapshots --diff
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/rulescope
+PrivateTmp=yes

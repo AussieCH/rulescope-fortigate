@@ -1,0 +1,31 @@
+"""Change notifications: generic JSON webhook (Slack/Mattermost/Teams-workflow style 'text') and syslog."""
+from __future__ import annotations
+
+import datetime as _dt
+import json
+import socket
+import urllib.request
+from typing import Any, Dict, List, Optional
+
+
+def webhook(url: str, device: str, alerts: List[str], changes: int, report_link: Optional[str] = None,
+            timeout: int = 10) -> None:
+    text = f"rulescope: {len(alerts)} risky change(s) on {device}\n" + "\n".join(f"- {a}" for a in alerts)
+    if report_link:
+        text += f"\n{report_link}"
+    payload: Dict[str, Any] = {"text": text, "device": device, "alerts": alerts, "changes": changes}
+    req = urllib.request.Request(url, data=json.dumps(payload).encode(), method="POST",
+                                 headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        r.read()
+
+
+def syslog(target: str, device: str, alerts: List[str]) -> None:
+    """RFC 5424 over UDP, facility local0, severity warning. target = host[:port]."""
+    host, _, port = target.partition(":")
+    ts = _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds")
+    me = socket.gethostname()
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+        for a in alerts:
+            msg = f"<132>1 {ts} {me} rulescope - change - device={device} alert=\"{a.replace(chr(34), chr(39))}\""
+            s.sendto(msg.encode()[:2048], (host, int(port or 514)))

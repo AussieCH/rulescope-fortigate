@@ -1,0 +1,240 @@
+# rulescope remediation script
+# Device: FGT-BR-NORTH  FGT40F v7.2.10  VDOM: root
+# Generated: 2026-11-05T21:06:08+00:00
+#
+# REVIEW EVERY BLOCK BEFORE APPLYING. Take a config backup first.
+# Lines prefixed with '#' change traffic behaviour, VPN peers or management reachability
+# and are left commented out on purpose. Uncomment only after review.
+# Policies are disabled rather than deleted so the change is reversible.
+
+# [HIGH] Management exposed on internet-facing interface: WAN interface wan1 accepts https, ssh; no trusted hosts on: admin.
+# config system interface
+#     edit "wan1"
+#         set allowaccess ping
+#     next
+# end
+
+# [LOW] Management exposed on internet-facing interface: WAN interface wan2 has https enabled, blocked by local-in policy #1. Remove it from allowaccess so a later local-in change cannot expose it.
+# config system interface
+#     edit "wan2"
+#         set allowaccess ping
+#     next
+# end
+
+# [MEDIUM] Admin GUI accepts TLS older than 1.2: admin-https-ssl-versions is tlsv1-1 tlsv1-2 tlsv1-3.
+config system global
+    set admin-https-ssl-versions tlsv1-2 tlsv1-3
+end
+
+# [MEDIUM] SNMP v1/v2c community enabled: Community #1 answers SNMP v1/v2c from any address; SNMP is allowed on internal.
+# config system snmp community
+#     edit 1
+#         set status disable
+#     next
+# end
+
+# [LOW] Weak admin lockout: Admins are locked out after 3 failed attempts for 60 seconds (the default).
+config system global
+    set admin-lockout-threshold 3
+    set admin-lockout-duration 900
+end
+
+# [LOW] No admin password policy: Password policy is disabled.
+config system password-policy
+    set status enable
+    set apply-to admin-password
+    set minimum-length 12
+    set min-lower-case-letter 1
+    set min-upper-case-letter 1
+    set min-number 1
+    set min-non-alphanumeric 1
+end
+
+# [LOW] Private data encryption disabled: private-data-encryption is disable. Enabling it prompts for a 32-digit hex key on the CLI; store the key safely, because backups cannot be restored without it.
+# config system global
+#     set private-data-encryption enable
+# end
+
+# [LOW] Time synchronization disabled: ntpsync is disable.
+config system ntp
+    set ntpsync enable
+end
+
+# [LOW] Static-key TLS ciphers allowed: ssl-static-key-ciphers is enable.
+config system global
+    set ssl-static-key-ciphers disable
+end
+
+# [LOW] USB auto-install enabled: auto-install-config and auto-install-image enabled.
+config system auto-install
+    set auto-install-config disable
+    set auto-install-image disable
+end
+
+# [INFO] Admin services on default ports: HTTPS admin on 443 and SSH admin on 22, the default ports.
+# config system global
+#     set admin-sport 8443
+#     set admin-ssh-port 2222
+# end
+
+# [INFO] Hostname shown on the login page: gui-display-hostname is enable.
+config system global
+    set gui-display-hostname disable
+end
+
+# [INFO] No login banner: pre-login-banner is disable.
+config system global
+    set pre-login-banner enable
+end
+
+# [HIGH] Deny rule never applies: Deny #12 'block-bad-host' is shadowed by earlier accept #10 'LAN-internet'.
+# config firewall policy
+#     move 12 before 10
+# end
+
+# [MEDIUM] LDAP server queried without TLS: LDAP server 'DC01' is queried on port 389 with secure disable.
+# config user ldap
+#     edit "DC01"
+#         set secure ldaps
+#         set port 636
+#         set ca-cert "<CA certificate of the directory>"
+#     next
+# end
+
+# [MEDIUM] Accept rule can never match: Accept #22 'web-to-db' is shadowed by earlier deny #21 'dmz-deny-lan'.
+config firewall policy
+    edit 22
+        set status disable
+        set comments "rulescope 2026-11-05: shadowed by deny policy 21"
+    next
+end
+
+# [MEDIUM] IPsec tunnel allows weak cryptography: Phase 1 'branch-vpn' allows 3des-md5, aes128-sha1, DH group 2.
+# config vpn ipsec phase1-interface
+#     edit "branch-vpn"
+#         set proposal aes256-sha256 aes256gcm-prfsha384
+#         set dhgrp 21 20 14
+#     next
+# end
+
+# [LOW] IPsec tunnel allows weak cryptography: Phase 2 'branch-p2' (tunnel branch-vpn) allows aes128-sha1.
+# config vpn ipsec phase2-interface
+#     edit "branch-p2"
+#         set proposal aes256-sha256 aes256gcm
+#         set dhgrp 21 20 14
+#     next
+# end
+
+# [LOW] Rule uses an expired schedule: #60 'promo-access' uses schedule 'promo-2024', which has ended.
+config firewall policy
+    edit 60
+        set status disable
+        set comments "rulescope 2026-11-05: schedule promo-2024 expired"
+    next
+end
+
+# [LOW] IPS sensor does not block botnet connections: IPS sensor 'default' (used by #11) has scan-botnet-connections disable.
+# config ips sensor
+#     edit "default"
+#         set scan-botnet-connections block
+#     next
+# end
+
+# [LOW] No deny rule for known-malicious internet sources: 2 rules publish services to the whole internet (#30, #31) with no deny rule above them for Tor, scanner or malicious-server sources.
+# config firewall policy
+#     edit 0
+#         set name "deny-known-bad-sources"
+#         set srcintf "wan1"
+#         set dstintf "any"
+#         set internet-service-src enable
+#         set internet-service-src-name "Tor-Exit.Node" "Tor-Relay.Node" "Malicious-Malicious.Server" "Scanner-Scanner"
+#         set dstaddr "all"
+#         set action deny
+#         set schedule "always"
+#         set service "ALL"
+#         set logtraffic all
+#     next
+# end
+# (then move it above policy 30; ISDB names differ between FortiOS versions)
+
+# [LOW] Internet-bound rule missing security profiles: #11 'LAN-web' -> wan1: no antivirus, application control.
+# config firewall policy
+#     edit 11
+#         set utm-status enable
+#         set av-profile "default"
+#         set application-list "default"
+#     next
+# end
+
+# [LOW] Redundant rule: #11 'LAN-web' is fully covered by earlier #10 'LAN-internet' (accept).
+config firewall policy
+    edit 11
+        set status disable
+        set comments "rulescope 2026-11-05: redundant, covered by policy 10"
+    next
+end
+
+# [LOW] Redundant rule: #40 'm365' is fully covered by earlier #10 'LAN-internet' (accept).
+config firewall policy
+    edit 40
+        set status disable
+        set comments "rulescope 2026-11-05: redundant, covered by policy 10"
+    next
+end
+
+# [LOW] Redundant rule: #51 'lan-https-dmz' is fully covered by earlier #50 'lan-ping-dmz' (accept).
+config firewall policy
+    edit 51
+        set status disable
+        set comments "rulescope 2026-11-05: redundant, covered by policy 50"
+    next
+end
+
+# [LOW] Redundant rule: #60 'promo-access' is fully covered by earlier #10 'LAN-internet' (accept).
+config firewall policy
+    edit 60
+        set status disable
+        set comments "rulescope 2026-11-05: redundant, covered by policy 10"
+    next
+end
+
+# [LOW] Unreferenced object: firewall service custom "TCP_8443" is not referenced.
+config firewall service custom
+    delete "TCP_8443"
+end
+
+# [LOW] Unreferenced object: firewall addrgrp "Unused_Group" is not referenced.
+config firewall addrgrp
+    delete "Unused_Group"
+end
+
+# [LOW] Unreferenced object: firewall vip "VIP_ALL" is not referenced.
+config firewall vip
+    delete "VIP_ALL"
+end
+
+# [LOW] Unreferenced object: firewall vip "VIP_RDP" is not referenced.
+config firewall vip
+    delete "VIP_RDP"
+end
+
+# [LOW] IPsec phase 2 without perfect forward secrecy: Phase 2 'branch-p2' (tunnel branch-vpn) has pfs disable.
+# config vpn ipsec phase2-interface
+#     edit "branch-p2"
+#         set pfs enable
+#         set dhgrp 21 20 14
+#     next
+# end
+
+# [LOW] Zone allows traffic between its interfaces without a policy: Zone LAN_ZONE (internal) has intrazone allow.
+# config system zone
+#     edit "LAN_ZONE"
+#         set intrazone deny
+#     next
+# end
+
+# [INFO] Disabled rule: #41 is disabled.
+# config firewall policy
+#     delete 41
+# end
+

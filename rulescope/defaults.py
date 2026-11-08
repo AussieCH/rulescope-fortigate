@@ -1,0 +1,26 @@
+"""Factory-default object names. These ship with FortiOS, so 'unused' is not a finding."""
+
+DEFAULT_ADDRESSES = {
+    "all", "none", "FABRIC_DEVICE", "FIREWALL_AUTH_PORTAL_ADDRESS", "SSLVPN_TUNNEL_ADDR1",
+    "SSLVPN_TUNNEL_IPv6_ADDR1", "EMS_ALL_UNKNOWN_CLIENTS", "EMS_ALL_UNMANAGEABLE_CLIENTS",
+    "FCTEMS_ALL_FORTICLOUD_SERVERS", "login.microsoftonline.com", "login.microsoft.com",
+    "login.windows.net", "gmail.com", "wildcard.google.com", "wildcard.dropbox.com",
+    "G Suite", "Microsoft Office 365", "FORTINET_ALL",
+}
+
+DEFAULT_ADDRGRPS = {"G Suite", "Microsoft Office 365"}
+
+DEFAULT_SERVICES = {
+    "ALL", "ALL_TCP", "ALL_UDP", "ALL_ICMP", "ALL_ICMP6", "GRE", "AH", "ESP", "AOL", "BGP",
+    "DHCP", "DNS", "FINGER", "FTP", "FTP_GET", "FTP_PUT", "GOPHER", "H323", "HTTP", "HTTPS",
+    "IKE", "IMAP", "IMAPS", "Internet-Locator-Service", "IRC", "L2TP", "LDAP", "NetMeeting",
+    "NFS", "NNTP", "NTP", "OSPF", "PC-Anywhere", "PING", "TIMESTAMP", "INFO_REQUEST",
+    "INFO_ADDRESS", "ONC-RPC", "DCE-RPC", "POP3", "POP3S", "PPTP", "QUAKE", "RAUDIO", "REXEC",
+    "RIP", "RLOGIN", "RSH", "SCCP", "SIP", "SIP-MSNmessenger", "SAMBA", "SMTP", "SMTPS", "SNMP",
+    "SSH", "SYSLOG", "TALK", "TELNET", "TFTP", "MGCP", "UUCP", "VDOLIVE", "WAIS", "WINFRAME",
+    "X-WINDOWS", "PING6", "MS-SQL", "MYSQL", "RDP", "VNC", "DHCP6", "SQUID", "SOCKS", "WINS",
+    "RADIUS", "RADIUS-OLD", "CVSPSERVER", "AFS3", "TRACEROUTE", "RTSP", "MMS", "KERBEROS",
+    "LDAP_UDP", "SMB", "NONE", "webproxy", "SAMBA", "DNS-over-HTTPS", "DNS-over-TLS",
+}
+
+DEFAULT_SERVICEGRPS = {"Email Access", "Web Access", "Windows AD", "Exchange Server"}
