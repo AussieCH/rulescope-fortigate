@@ -30,7 +30,9 @@ class ApiError(Exception):
         super().__init__(f"HTTP {status} on {path}" + (f": {hint}" if hint else "") + (f" ({detail})" if detail else ""))
 
 
-_SECRET_RE = re.compile(r"([\w.-]*(?:passw|psk|secret|key|token|private)[\w.-]*)\[[^\]]*\]", re.I)
+# attr[old->new] or attr[old]->[new]: mask every bracketed value that belongs to a secret-looking attribute
+_SECRET_RE = re.compile(r"([\w.-]*(?:passw|psk|secret|key|token|private)[\w.-]*)\[[^\]]*\](?:\s*->\s*\[[^\]]*\])?",
+                        re.I)
 
 
 def _sanitize(s: Any, limit: int) -> str:
@@ -56,6 +58,15 @@ def _event_time(e: Dict[str, Any]) -> int:
     return 0
 
 
+def _progress(resp: Dict[str, Any]) -> float:
+    """Percent complete of a log search; a missing value means done, 0 means just started."""
+    v = resp.get("completed")
+    try:
+        return 100.0 if v is None or v == "" else float(v)
+    except (TypeError, ValueError):
+        return 100.0
+
+
 def normalize_event(e: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "time": _event_time(e), "user": str(e.get("user", "")), "ui": str(e.get("ui", "")),
@@ -67,7 +78,8 @@ def normalize_event(e: Dict[str, Any]) -> Dict[str, Any]:
 class FortiGateAPI:
     def __init__(self, host: str, token: str, port: int = 443, vdom: str = "root",
                  verify: bool = True, ca_file: Optional[str] = None, timeout: int = 30):
-        self.base = f"https://{host}:{port}"
+        h = host.strip("[]")
+        self.base = f"https://[{h}]:{port}" if ":" in h else f"https://{h}:{port}"
         self.token, self.vdom, self.timeout = token, vdom, timeout
         if verify:
             self.ctx = ssl.create_default_context(cafile=ca_file)
@@ -131,7 +143,7 @@ class FortiGateAPI:
                 resp = self._request("GET", path, params)
                 tries = 0
                 while (isinstance(resp, dict) and resp.get("session_id") and tries < 10
-                       and float(resp.get("completed", 100) or 100) < 100):
+                       and _progress(resp) < 100):
                     time.sleep(0.5)
                     tries += 1
                     resp = self._request("GET", path, {**params, "session_id": str(resp["session_id"])})

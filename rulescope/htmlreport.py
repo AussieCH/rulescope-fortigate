@@ -400,7 +400,7 @@ def _exposure(result: Dict[str, Any]) -> str:
     rows = []
     for x in sorted(rows_in, key=lambda x: (SEVERITY_ORDER[x["severity"]], x["kind"], x.get("policyid") or 0)):
         risky = "".join(f'<span class="svc">{_e(s)}</span>' for s in x.get("risky", []))
-        rule = (f'<a href="#inv-{x["policyid"]}">#{x["policyid"]}</a>' if x.get("policyid") is not None
+        rule = (f'<a href="#inv-{_e(x["policyid"])}">#{_e(x["policyid"])}</a>' if x.get("policyid") is not None
                 else _e(x.get("label") or ""))
         hits = "" if x.get("hits") is None else "{:,}".format(x["hits"])
         rows.append(f'<tr><td>{_pill(x["severity"])}</td><td>{_e(x["kind"])}</td><td>{_e(x["source"])}</td>'

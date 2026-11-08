@@ -120,8 +120,8 @@ def _outputs(snap: Dict[str, Any], args: argparse.Namespace) -> int:
             baseline, _ = redact(baseline)
         redacted = True
         if args.redact_map:
-            _write(args.redact_map, json.dumps(mapping, indent=1, ensure_ascii=False))
-            os.chmod(args.redact_map, 0o600)
+            source.write_private(args.redact_map, json.dumps(mapping, indent=1, ensure_ascii=False))
+            print(f"wrote {args.redact_map}")
     adv_client = _advisor(args)
     adv = adv_client.lookup(snap["device"].get("version")) if adv_client else None
     result = checks.analyze(snap, stale_days=args.stale_days, baseline=baseline, advisories=adv,

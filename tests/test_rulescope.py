@@ -1007,5 +1007,119 @@ class ApiPathTests(unittest.TestCase):
         self.assertEqual((st2["BP07"], st2["BP09"]), ("unknown", "unknown"))
 
 
+class ReviewFixTests(unittest.TestCase):
+    def test_log_poll_waits_when_progress_is_zero(self):
+        from rulescope import api
+        self.assertEqual(api._progress({"completed": 0}), 0.0)
+        self.assertEqual(api._progress({"completed": "40"}), 40.0)
+        self.assertEqual(api._progress({}), 100.0)
+
+        calls = []
+
+        class Fake(api.FortiGateAPI):
+            def _request(self, method, path, params=None, body=None, raw=False):
+                calls.append(params.get("session_id"))
+                if "session_id" not in params:
+                    return {"session_id": 7, "completed": 0, "results": []}
+                return {"session_id": 7, "completed": 100,
+                        "results": [{"cfgpath": "firewall.policy", "eventtime": 1700000000}]}
+
+        orig = api.time.sleep
+        api.time.sleep = lambda s: None
+        try:
+            events, src = Fake("192.0.2.1", "t").config_events()
+        finally:
+            api.time.sleep = orig
+        self.assertEqual((len(events), src), (1, "disk"))
+        self.assertEqual(calls, [None, "7"])
+
+    def test_secret_masking_covers_old_and_new_values(self):
+        from rulescope.api import _sanitize
+        out = _sanitize("psksecret[ENC aaa]->[ENC bbb] comments[x]->[y]", 400)
+        self.assertNotIn("aaa", out)
+        self.assertNotIn("bbb", out)
+        self.assertIn("comments[x]->[y]", out)
+        self.assertNotIn("s3cr3t", _sanitize("passwd[old->s3cr3t]", 400))
+
+    def test_ipv6_hosts(self):
+        from rulescope.api import FortiGateAPI
+        self.assertEqual(source.split_host_port("[2001:db8::1]:8443", 443), ("2001:db8::1", 8443))
+        self.assertEqual(source.split_host_port("[2001:db8::1]", 443), ("2001:db8::1", 443))
+        self.assertEqual(source.split_host_port("2001:db8::1", 443), ("2001:db8::1", 443))
+        self.assertEqual(FortiGateAPI("2001:db8::1", "t", port=8443).base, "https://[2001:db8::1]:8443")
+        self.assertEqual(FortiGateAPI("192.0.2.1", "t").base, "https://192.0.2.1:443")
+
+    def test_private_files_are_never_world_readable(self):
+        tmp = tempfile.mkdtemp()
+        old = os.umask(0o022)
+        try:
+            p = os.path.join(tmp, "map.json")
+            with open(p, "w") as fh:
+                fh.write("old")
+            os.chmod(p, 0o644)
+            source.write_private(p, "secret")
+            self.assertEqual(os.stat(p).st_mode & 0o777, 0o600)
+            with open(p) as fh:
+                self.assertEqual(fh.read(), "secret")
+            path = source.save_snapshot({"device": {"hostname": "fw"}}, tmp)
+            self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
+        finally:
+            os.umask(old)
+            shutil.rmtree(tmp)
+
+    def test_snapshot_names_are_utc(self):
+        import datetime as _dt
+        tmp = tempfile.mkdtemp()
+        try:
+            path = source.save_snapshot({"device": {"hostname": "fw"}}, tmp)
+            age = time.time() - source._stamp_epoch(path)
+            self.assertLess(abs(age), 5)
+            now = _dt.datetime.now(_dt.timezone.utc).strftime("%Y%m%d")
+            self.assertTrue(os.path.basename(path).startswith(now))
+        finally:
+            shutil.rmtree(tmp)
+
+    def test_redacted_ips_stay_plain_and_unique(self):
+        from rulescope.redact import _IPs
+        ips = _IPs("203.0.113.", "198.18.")
+        out = [ips(f"10.0.{i // 250}.{i % 250}") for i in range(600)]
+        self.assertEqual(len(set(out)), 600)
+        self.assertTrue(all("/" not in o for o in out))
+        self.assertEqual((out[0], out[253], out[254], out[507]), ("203.0.113.1", "203.0.113.254", "198.18.0.1",
+                                                                  "198.18.0.254"))
+        self.assertEqual(out[508], "198.18.1.1")
+
+    def test_exposure_policyid_is_escaped(self):
+        # policy IDs are integers after parsing; the escape is defence in depth for any non-numeric ID
+        evil = '9"><script>alert(1)</script>'
+        snap = model.from_config(load_sample())
+        res = checks.analyze(snap)
+        row = next(x for x in res["exposure"] if x.get("policyid") is not None)
+        row["policyid"] = evil
+        res["exposure"] = [row]
+        html = report.html_report(res, snap)
+        self.assertNotIn("<script>alert(1)", html)
+        self.assertIn("#9&quot;&gt;&lt;script&gt;alert(1)", html)
+
+    def test_syslog_is_one_line_and_supports_ipv6(self):
+        import socket
+        from rulescope import notify
+        for fam, host in ((socket.AF_INET, "127.0.0.1"), (socket.AF_INET6, "::1")):
+            try:
+                srv = socket.socket(fam, socket.SOCK_DGRAM)
+                srv.bind((host, 0))
+            except OSError:
+                continue  # no IPv6 on this machine
+            srv.settimeout(5)
+            port = srv.getsockname()[1]
+            target = f"[{host}]:{port}" if fam == socket.AF_INET6 else f"{host}:{port}"
+            notify.syslog(target, "fw\n1", ['rule "a"\r\nfake line'])
+            msg = srv.recv(4096).decode()
+            srv.close()
+            self.assertNotIn("\n", msg)
+            self.assertNotIn("\r", msg)
+            self.assertIn("alert=\"rule 'a'  fake line\"", msg)
+
+
 if __name__ == "__main__":
     unittest.main()

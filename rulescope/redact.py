@@ -44,15 +44,24 @@ class _NS:
 
 
 class _IPs:
-    def __init__(self, base: str):
-        self.base, self.map, self.n = base, {}, 0
+    """Stand-in addresses: the first 254 from `base` (a /24 prefix such as "203.0.113."), the rest from
+    `overflow` (a /16 prefix such as "198.18."), so every pseudonym is a distinct plain host address."""
+
+    def __init__(self, base: str, overflow: str):
+        self.base, self.overflow, self.map, self.n = base, overflow, {}, 0
 
     def __call__(self, ip: str) -> str:
         if not ip:
             return ip
         if ip not in self.map:
             self.n += 1
-            self.map[ip] = f"{self.base}{self.n % 254 or 254}" + ("" if self.n < 255 else f"/{self.n // 254}")
+            if self.n <= 254:
+                self.map[ip] = f"{self.base}{self.n}"
+            else:
+                m = self.n - 255
+                if m >= 256 * 254:
+                    raise ValueError("more distinct addresses than the redaction ranges can hold")
+                self.map[ip] = f"{self.overflow}{m // 254}.{m % 254 + 1}"
         return self.map[ip]
 
 
@@ -73,7 +82,8 @@ def redact(snap: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Dict[str, st
     P = _NS({}, "PROFILE", _DEFAULT_PROFILES)
     P2 = _NS({}, "P2", set())
     POOL = _NS({}, "POOL", set())
-    EXT, MAPPED, PEER = _IPs("203.0.113."), _IPs("10.255.0."), _IPs("198.51.100.")
+    # documentation ranges first, then the benchmarking range 198.18.0.0/15 (one /16 each)
+    EXT, MAPPED, PEER = _IPs("203.0.113.", "198.18."), _IPs("10.255.0.", "10.254."), _IPs("198.51.100.", "198.19.")
 
     s["device"]["hostname"] = "FIREWALL"
     s["device"]["serial"] = ""
