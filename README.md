@@ -241,3 +241,11 @@ The API token is read-only and restricted to one source IP by trusted hosts. Sna
 python3 -m unittest discover -s tests -v
 python3 tests/bench.py 10000          # performance on a synthetic 10k-rule base
 ```
+
+## License
+
+Copyright 2026 Pavel Simanovski
+
+Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE) for the full text.
+
+rulescope is provided "as is", without warranty of any kind. It reads configurations and never changes them; review every remediation script before applying it to a firewall.
