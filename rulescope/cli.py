@@ -36,7 +36,8 @@ def _snapshot_from_args(args: argparse.Namespace) -> Dict[str, Any]:
                                     vdom=args.vdom, token=token, insecure=args.insecure, ca_file=args.ca_file,
                                     timeout=args.timeout, with_backup=not args.no_backup,
                                     with_events=not args.no_events, usage=getattr(args, "usage", None),
-                                    usage_since=getattr(args, "usage_since", None))
+                                    usage_since=getattr(args, "usage_since", None),
+                                    pin_sha256=getattr(args, "pin_sha256", None))
     except ApiError as e:
         raise SystemExit(f"API error: {e}")
     except (ConnectionError, ValueError, OSError) as e:
@@ -95,9 +96,22 @@ def _add_firmware(p: argparse.ArgumentParser) -> None:
 
 
 def _write(path: str, text: str) -> None:
-    with open(path, "w", encoding="utf-8") as fh:
-        fh.write(text)
+    # reports describe the weaknesses of a firewall: readable by the owner only, whatever the umask
+    source.write_private(path, text)
     print(f"wrote {path}")
+
+
+def _webhook(args: argparse.Namespace) -> Optional[str]:
+    try:
+        return notify.webhook_url(getattr(args, "webhook", None), getattr(args, "webhook_file", None))
+    except (OSError, ValueError) as e:
+        raise SystemExit(f"webhook: {e}")
+
+
+def _add_notify(p: argparse.ArgumentParser) -> None:
+    p.add_argument("--webhook", help="POST risky-change alerts to this URL (prefer --webhook-file: the URL is a secret)")
+    p.add_argument("--webhook-file", help="File containing the webhook URL (or set RULESCOPE_WEBHOOK)")
+    p.add_argument("--syslog", help="Send risky-change alerts to host[:port] via UDP syslog")
 
 
 def _load_json(path: str) -> Dict[str, Any]:
@@ -115,9 +129,10 @@ def _outputs(snap: Dict[str, Any], args: argparse.Namespace) -> int:
             apply_wan(baseline, args.wan, args.not_wan)
     redacted = False
     if args.redact:
-        snap, mapping = redact(snap)
+        shared: Dict[str, Any] = {}  # one pseudonym table for both, so the comparison matches the same objects
+        snap, mapping = redact(snap, shared)
         if baseline is not None and "findings" not in baseline:
-            baseline, _ = redact(baseline)
+            baseline, _ = redact(baseline, shared)
         redacted = True
         if args.redact_map:
             source.write_private(args.redact_map, json.dumps(mapping, indent=1, ensure_ascii=False))
@@ -155,7 +170,12 @@ def _add_source(p: argparse.ArgumentParser, allow_config: bool = True) -> None:
     g.add_argument("--vdom", default="root")
     g.add_argument("--token-file", help="File containing the REST API token")
     g.add_argument("--token", help="API token (prefer --token-file or RULESCOPE_TOKEN)")
-    g.add_argument("--insecure", action="store_true", help="Skip TLS verification (self-signed certificate)")
+    g.add_argument("--insecure", action="store_true",
+                   help="Skip TLS verification entirely. Anyone on the path can then read the API token: "
+                        "use --pin-sha256 for a self-signed certificate instead")
+    g.add_argument("--pin-sha256", metavar="FINGERPRINT",
+                   help="SHA-256 fingerprint of the FortiGate certificate (hex, colons allowed). Checked on every "
+                        "connection; the right choice for a self-signed certificate")
     g.add_argument("--ca-file", help="CA bundle to verify the FortiGate certificate")
     g.add_argument("--timeout", type=int, default=30)
     g.add_argument("--no-backup", action="store_true", help="Do not read the config backup for reference counts")
@@ -206,8 +226,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     _add_wan(c)
     c.add_argument("--out", default="snapshots", help="Snapshot directory (default: ./snapshots)")
     c.add_argument("--diff", action="store_true", help="Print changes since the previous snapshot")
-    c.add_argument("--webhook", help="POST risky-change alerts to this URL")
-    c.add_argument("--syslog", help="Send risky-change alerts to host[:port] via UDP syslog")
+    _add_notify(c)
 
     n = sub.add_parser("analyze", help="Analyze a saved snapshot")
     n.add_argument("snapshot")
@@ -232,8 +251,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     f.add_argument("--stale-days", type=int, default=90)
     f.add_argument("--baseline-days", type=int, default=30, help="Compare each report with a snapshot this old")
     f.add_argument("--auditor", default="")
-    f.add_argument("--webhook", help="POST risky-change alerts to this URL")
-    f.add_argument("--syslog", help="Send risky-change alerts to host[:port] via UDP syslog")
+    _add_notify(f)
     f.add_argument("--palette", choices=list(PALETTES), default="harbor", help="Default color palette of the pages")
     _add_firmware(f)
 
@@ -249,28 +267,48 @@ def main(argv: Optional[List[str]] = None) -> int:
         snap = _snapshot_from_args(args)
         apply_wan(snap, args.wan, args.not_wan)
         if args.save_snapshot:
-            print(f"snapshot {source.save_snapshot(snap, args.save_snapshot)}")
+            saved = source.save_snapshot(snap, args.save_snapshot)
+            print(f"snapshot {saved}")
+            source.prune(os.path.dirname(saved))
         return _outputs(snap, args)
 
     if args.cmd == "collect":
+        hook = _webhook(args)
         snap = _snapshot_from_args(args)
         apply_wan(snap, args.wan, args.not_wan)
         path = source.save_snapshot(snap, args.out)
         print(f"snapshot {path}")
-        files = source.list_snapshots(os.path.dirname(path))
-        if args.diff or args.webhook or args.syslog:
+        sdir = os.path.dirname(path)
+        files = source.list_snapshots(sdir)
+        rc = 0
+        if args.diff or hook or args.syslog:
+            alerts: List[str] = []
+            changes = 0
             if len(files) < 2:
                 print("no previous snapshot to compare")
-                return 0
-            res = diff.diff_snapshots(source.load_snapshot(files[-2]), snap)
-            if args.diff:
-                print(diff.render_text(res))
-            dev = snap["device"].get("hostname") or "fortigate"
-            if res["alerts"] and args.webhook:
-                notify.webhook(args.webhook, dev, res["alerts"], len(res["objects"]) + sum(map(len, res["policies"].values())))
-            if res["alerts"] and args.syslog:
-                notify.syslog(args.syslog, dev, res["alerts"])
-        return 0
+            else:
+                res = diff.diff_snapshots(source.load_snapshot(files[-2]), snap)
+                if args.diff:
+                    print(diff.render_text(res))
+                alerts = res["alerts"]
+                changes = len(res["objects"]) + sum(map(len, res["policies"].values()))
+            if hook or args.syslog:
+                dev = snap["device"].get("hostname") or "fortigate"
+
+                def send(todo: List[str]) -> None:
+                    if hook:
+                        notify.webhook(hook, dev, todo, changes)
+                    if args.syslog:
+                        notify.syslog(args.syslog, dev, todo)
+
+                # not a .json name: every *.json in this folder is a snapshot
+                err = notify.deliver(os.path.join(sdir, "pending-alerts.list"), send, alerts)
+                if err:
+                    print(f"warning: alerts not delivered ({err}); they are kept and sent with the next run",
+                          file=sys.stderr)
+                    rc = 4
+        source.prune(sdir)  # hourly snapshots would otherwise grow without limit
+        return rc
 
     if args.cmd == "analyze":
         try:
@@ -305,7 +343,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         except (OSError, ValueError) as e:
             raise SystemExit(f"inventory: {e}")
         summary = fleet.run(devices, args.out, args.snapshots, workers=args.workers, stale_days=args.stale_days,
-                            baseline_days=args.baseline_days, auditor=args.auditor, webhook=args.webhook,
+                            baseline_days=args.baseline_days, auditor=args.auditor, webhook=_webhook(args),
                             syslog_target=args.syslog, advisor=_advisor(args), lifecycle=_lifecycle(args),
                             palette=args.palette)
         for r in summary["devices"]:
@@ -314,8 +352,13 @@ def main(argv: Optional[List[str]] = None) -> int:
                       f"changes={r.get('changes', 0)} alerts={len(r.get('alerts', []))}")
             else:
                 print(f"{r['name']:24} ERROR {r.get('error')}")
+            if r.get("notify_error"):
+                print(f"{r['name']:24} warning: alerts not delivered ({r['notify_error']}); kept for the next run",
+                      file=sys.stderr)
         print(f"wrote {os.path.join(args.out, 'index.html')}")
-        return 3 if any(r["status"] != "ok" for r in summary["devices"]) else 0
+        if any(r["status"] != "ok" for r in summary["devices"]):
+            return 3
+        return 4 if any(r.get("notify_error") for r in summary["devices"]) else 0
 
     if args.cmd == "firmware":
         client = _advisor(args)

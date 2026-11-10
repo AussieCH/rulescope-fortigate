@@ -8,10 +8,18 @@ from collections import OrderedDict
 from html import escape
 from typing import Any, Dict, List, Optional
 
-from .catalog import AREAS, CHECKS, EFFORT_LABEL, SEVERITY_ORDER
+from .catalog import AREAS, CHECKS, EFFORT_LABEL, SEVERITY_ORDER, one_line
+
 
 def _e(x: Any) -> str:
     return escape("" if x is None else str(x))
+
+
+def _cell(v: Any) -> Any:
+    """A CSV cell that a spreadsheet will not run as a formula (names come from the device)."""
+    if isinstance(v, str) and v[:1] in ("=", "+", "-", "@", "\t", "\r"):
+        return "'" + v
+    return v
 
 
 def _ts(epoch: Optional[int], fmt: str = "%Y-%m-%d") -> str:
@@ -53,9 +61,10 @@ def remediation_cli(result: Dict[str, Any], only: Optional[set] = None, safe_onl
                     title: str = "remediation") -> str:
     dev = result["device"]
     lines = [
-        f"# rulescope {title} script",
-        f"# Device: {dev.get('hostname') or '-'}  {dev.get('model', '')} {dev.get('version', '')}  VDOM: {dev.get('vdom')}",
-        f"# Generated: {result['collected_at']}",
+        f"# rulescope {one_line(title)} script",
+        one_line(f"# Device: {dev.get('hostname') or '-'}  {dev.get('model', '')} {dev.get('version', '')}  "
+                 f"VDOM: {dev.get('vdom')}"),
+        one_line(f"# Generated: {result['collected_at']}"),
         "#",
         "# REVIEW EVERY BLOCK BEFORE APPLYING. Take a config backup first.",
         "# Lines prefixed with '#' change traffic behaviour, VPN peers or management reachability",
@@ -74,8 +83,9 @@ def remediation_cli(result: Dict[str, Any], only: Optional[set] = None, safe_onl
             if not f["cli"] or key in seen or (safe_only and not f["cli_safe"]):
                 continue
             seen.add(key)
-            block = [f"# [{f['severity'].upper()}] {CHECKS[check][2]}: {f['detail']}"]
-            block += [ln if f["cli_safe"] else "# " + ln for ln in f["cli"]]
+            # every physical line is cleaned again here: findings can also come from a findings JSON
+            block = [one_line(f"# [{f['severity'].upper()}] {CHECKS[check][2]}: {f['detail']}")]
+            block += [one_line(ln) if f["cli_safe"] else "# " + one_line(ln) for ln in f["cli"]]
             (global_blocks if f["cli_scope"] == "global" else vdom_blocks).append("\n".join(block))
     if not vdom_blocks and not global_blocks:
         return "\n".join(lines + ["# No remediation commands generated."]) + "\n"
@@ -88,7 +98,7 @@ def remediation_cli(result: Dict[str, Any], only: Optional[set] = None, safe_onl
             lines.append("end\n")
     if vdom_blocks:
         if multi:
-            lines += ["config vdom", f"edit {dev.get('vdom', 'root')}"]
+            lines += ["config vdom", one_line(f"edit {dev.get('vdom', 'root')}")]
         lines += [b + "\n" for b in vdom_blocks]
         if multi:
             lines += ["next", "end"]
@@ -103,9 +113,10 @@ def findings_csv(result: Dict[str, Any]) -> str:
     w.writerow(["severity", "check", "title", "area", "effort", "policy_id", "object", "detail", "recommendation",
                 "compliance", "reference", "owner", "status", "notes"])
     for f in result["findings"]:
-        w.writerow([f["severity"], f["check"], f["title"], f["category"], EFFORT_LABEL.get(f.get("effort", ""), ""),
-                    f["policyid"] if f["policyid"] is not None else "", f["object"] or "", f["detail"], f["recommendation"],
-                    "; ".join(f.get("compliance", [])), f.get("url", ""), "", "", ""])
+        w.writerow([_cell(c) for c in (
+            f["severity"], f["check"], f["title"], f["category"], EFFORT_LABEL.get(f.get("effort", ""), ""),
+            f["policyid"] if f["policyid"] is not None else "", f["object"] or "", f["detail"], f["recommendation"],
+            "; ".join(f.get("compliance", [])), f.get("url", ""), "", "", "")])
     return "﻿" + buf.getvalue()  # BOM so Excel opens UTF-8 (Hebrew names) correctly
 
 
@@ -114,7 +125,8 @@ def practices_csv(result: Dict[str, Any]) -> str:
     w = csv.writer(buf)
     w.writerow(["id", "domain", "practice", "sources", "status", "evidence", "related_checks", "owner", "target_date", "notes"])
     for i in (result.get("practices") or {}).get("items", []):
-        w.writerow([i["id"], i["domain"], i["title"], i["sources"], i["status"], i["evidence"], "; ".join(i["checks"]), "", "", ""])
+        w.writerow([_cell(c) for c in (i["id"], i["domain"], i["title"], i["sources"], i["status"], i["evidence"],
+                                       "; ".join(i["checks"]), "", "", "")])
     return "\ufeff" + buf.getvalue()
 
 

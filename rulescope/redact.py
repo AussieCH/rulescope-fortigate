@@ -14,6 +14,7 @@ from collections import Counter
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
 from . import defaults
+from .hardening import _ISDB_BAD
 
 _PHYS = re.compile(r"^(port\d+|wan\d*|lan\d*|internal\d*|dmz\d*|mgmt\d*|ha\d*|x\d+|[ab]|fortilink|"
                    r"npu\d+_vlink\d+|s\d+|vw\d+|modem|loopback\d*|ssl\.root|any)$", re.I)
@@ -65,29 +66,60 @@ class _IPs:
         return self.map[ip]
 
 
-def redact(snap: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Dict[str, str]]]:
+def redact(snap: Dict[str, Any], shared: Optional[Dict[str, Any]] = None
+           ) -> Tuple[Dict[str, Any], Dict[str, Dict[str, str]]]:
+    """`shared`: pass the same (initially empty) dict to several calls to give the same object the same
+    pseudonym in every snapshot. Needed when a redacted snapshot is compared with a redacted baseline."""
     s = copy.deepcopy(snap)
-    A = _NS({**{n: "ADDR" for n in s["addresses"]}, **{n: "ADDRGRP" for n in s["addrgrps"]},
-             **{n: "VIP" for n in s["vips"]}, **{n: "VIPGRP" for n in s["vipgrps"]}}, "OBJ",
-            defaults.DEFAULT_ADDRESSES | defaults.DEFAULT_ADDRGRPS | {"all", "none"})
-    S = _NS({**{n: "SVC" for n in s["services"]}, **{n: "SVCGRP" for n in s["servicegrps"]}}, "SVC",
-            defaults.DEFAULT_SERVICES | defaults.DEFAULT_SERVICEGRPS)
+    store: Dict[str, Any] = shared if shared is not None else {}
+
+    def NS(key: str, prefixes: Dict[str, str], default: str, keep: Set[Any]) -> _NS:
+        ns = store.get(key)
+        if ns is None:
+            ns = store[key] = _NS(dict(prefixes), default, set(keep))
+        else:
+            ns.prefixes.update(prefixes)
+            ns.keep |= set(keep)
+        return ns
+
+    def IPS(key: str, base: str, overflow: str) -> _IPs:
+        if key not in store:
+            store[key] = _IPs(base, overflow)
+        return store[key]
+
+    A = NS("A", {**{n: "ADDR" for n in s["addresses"]}, **{n: "ADDRGRP" for n in s["addrgrps"]},
+                 **{n: "VIP" for n in s["vips"]}, **{n: "VIPGRP" for n in s["vipgrps"]}}, "OBJ",
+           defaults.DEFAULT_ADDRESSES | defaults.DEFAULT_ADDRGRPS | {"all", "none"})
+    S = NS("S", {**{n: "SVC" for n in s["services"]}, **{n: "SVCGRP" for n in s["servicegrps"]}}, "SVC",
+           defaults.DEFAULT_SERVICES | defaults.DEFAULT_SERVICEGRPS)
     ifkeep = {n for n in s["interfaces"] if _PHYS.match(n)} | {"any", "ssl.root", "virtual-wan-link"}
-    I = _NS({**{n: "ZONE" for n in s["zones"]}, **{n: "SDWAN" for n in s["sdwan_zones"]},
-             **{n: "VPN" for n in s.get("ipsec_p1", {})},
-             **{n: "VPN" for n, i in s["interfaces"].items() if i.get("type") == "tunnel"}}, "IF", ifkeep)
-    U = _NS({**{n: "ADMIN" for n in (s.get("admins") or {})}, **{n: "API" for n in (s.get("api_users") or {})}},
-            "USERGRP", {"admin"})
-    T = _NS({}, "SCHED", {"always", "none"})
-    P = _NS({}, "PROFILE", _DEFAULT_PROFILES)
-    P2 = _NS({}, "P2", set())
-    POOL = _NS({}, "POOL", set())
+    I = NS("I", {**{n: "ZONE" for n in s["zones"]}, **{n: "SDWAN" for n in s["sdwan_zones"]},
+                 **{n: "VPN" for n in s.get("ipsec_p1", {})},
+                 **{n: "VPN" for n, i in s["interfaces"].items() if i.get("type") == "tunnel"}}, "IF", ifkeep)
+    U = NS("U", {**{n: "ADMIN" for n in (s.get("admins") or {})}, **{n: "API" for n in (s.get("api_users") or {})}},
+           "USERGRP", {"admin"})
+    T = NS("T", {}, "SCHED", {"always", "none"})
+    P = NS("P", {}, "PROFILE", _DEFAULT_PROFILES)
+    P2 = NS("P2", {}, "P2", set())
+    POOL = NS("POOL", {}, "POOL", set())
+    V = NS("V", {}, "VDOM", {"root"})  # VDOM names are often customer names
+    # custom internet-service names; a name that marks a block list keeps a prefix the ISDB check recognizes
+    isdb_fields = ("internet-service-group", "internet-service-custom", "internet-service-custom-group",
+                   "internet-service-src-group", "internet-service-src-custom", "internet-service-src-custom-group")
+    ISDB = NS("ISDB", {n: "Malicious-ISDB" for p in s["policies"] for f in isdb_fields for n in p.get(f, [])
+                       if _ISDB_BAD.search(n)}, "ISDB", set())
     # documentation ranges first, then the benchmarking range 198.18.0.0/15 (one /16 each)
-    EXT, MAPPED, PEER = _IPs("203.0.113.", "198.18."), _IPs("10.255.0.", "10.254."), _IPs("198.51.100.", "198.19.")
+    EXT, MAPPED, PEER = (IPS("EXT", "203.0.113.", "198.18."), IPS("MAPPED", "10.255.0.", "10.254."),
+                         IPS("PEER", "198.51.100.", "198.19."))
 
     s["device"]["hostname"] = "FIREWALL"
     s["device"]["serial"] = ""
+    s["device"]["vdom"] = V(s["device"].get("vdom"))
     for p in s["policies"]:
+        p["uuid"] = ""
+        for f in isdb_fields:
+            if f in p:
+                p[f] = ISDB.many(p[f])
         p["srcintf"], p["dstintf"] = I.many(p["srcintf"]), I.many(p["dstintf"])
         for f in ("srcaddr", "dstaddr", "srcaddr6", "dstaddr6"):
             p[f] = A.many(p[f])
@@ -115,7 +147,9 @@ def redact(snap: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Dict[str, st
     s["vipgrps"] = {A(n): A.many(m) for n, m in s["vipgrps"].items()}
     s["zones"] = {I(n): I.many(m) for n, m in s["zones"].items()}
     s["sdwan_zones"] = {I(n): I.many(m) for n, m in s["sdwan_zones"].items()}
-    s["interfaces"] = {I(n): dict(v, name=I(n), alias="", ip="0.0.0.0 0.0.0.0") for n, v in s["interfaces"].items()}
+    # the interface address stays in memory like the address objects do (the local-in check needs it);
+    # it is never written to a report
+    s["interfaces"] = {I(n): dict(v, name=I(n), alias="", vdom=V(v.get("vdom"))) for n, v in s["interfaces"].items()}
     sch = s.get("schedules") or {"onetime": {}, "groups": {}}
     s["schedules"] = {"onetime": {T(n): dict(v, name=T(n)) for n, v in sch.get("onetime", {}).items()},
                       "groups": {T(n): T.many(m) for n, m in sch.get("groups", {}).items()}}
@@ -137,10 +171,10 @@ def redact(snap: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Dict[str, st
     if s.get("references") is not None:
         objs = set(snap["addresses"]) | set(snap["addrgrps"]) | set(snap["vips"]) | set(snap["vipgrps"])
         s["references"] = {(A(k) if k in objs else S(k)): v for k, v in s["references"].items()}
-    CERT = _NS({}, "CERT", {"", "Fortinet_Factory", "Fortinet_Factory_Backup", "self-sign", "Fortinet_SSL",
-                            "Fortinet_GUI_Server"})
-    ACC = _NS({}, "ACCPROFILE", {"super_admin", "super_admin_readonly", "prof_admin", "", None})
-    MISC = _NS({}, "NAME", {"full-access", "tunnel-access", "web-access"})
+    CERT = NS("CERT", {}, "CERT", {"", "Fortinet_Factory", "Fortinet_Factory_Backup", "self-sign", "Fortinet_SSL",
+                                   "Fortinet_GUI_Server"})
+    ACC = NS("ACC", {}, "ACCPROFILE", {"super_admin", "super_admin_readonly", "prof_admin", "", None})
+    MISC = NS("MISC", {}, "NAME", {"full-access", "tunnel-access", "web-access"})
     for coll in ("admins", "api_users"):
         for v in (s.get(coll) or {}).values():
             v["accprofile"] = ACC(v.get("accprofile"))
@@ -180,5 +214,5 @@ def redact(snap: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Dict[str, st
     mapping = {"addresses": A.map, "services": S.map, "interfaces": I.map, "users": U.map, "schedules": T.map,
                "profiles": P.map, "phase2": P2.map, "pools": POOL.map, "external_ips": EXT.map,
                "mapped_ips": MAPPED.map, "vpn_peers": PEER.map, "certificates": CERT.map, "admin_profiles": ACC.map,
-               "other_names": MISC.map, "hostname": {snap["device"].get("hostname", ""): "FIREWALL"}}
+               "other_names": MISC.map, "vdoms": V.map, "internet_services": ISDB.map, "hostname": {snap["device"].get("hostname", ""): "FIREWALL"}}
     return s, mapping

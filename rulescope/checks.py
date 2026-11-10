@@ -46,7 +46,12 @@ def _build_match(p: Dict[str, Any], r: Resolver) -> Match:
             return None
         return {f"{f}:{v}" for f in fields for v in p.get(f, [])}
 
-    skip = any(p.get(k) == "enable" for k in ("srcaddr-negate", "dstaddr-negate", "service-negate"))
+    # Rules we cannot reason about exactly never cover and are never covered: negated addresses,
+    # services or internet services, and rules narrowed by a match field the model does not resolve
+    # (ZTNA tags, IPv6 internet services, vendor MAC ...; see model.EXTRA_MATCH_FIELDS).
+    skip = (any(p.get(k) == "enable" for k in ("srcaddr-negate", "dstaddr-negate", "service-negate",
+                                               "internet-service-negate", "internet-service-src-negate"))
+            or bool(p.get("extra-match")))
     return Match(
         p=p, src_if=r.interfaces(p["srcintf"]), dst_if=r.interfaces(p["dstintf"]),
         src=r.addresses(p["srcaddr"]), dst=r.addresses(p["dstaddr"]), svc=r.services(p["service"]),
@@ -291,6 +296,16 @@ def check_usage(snap: Dict[str, Any], stale_days: int, today: str) -> List[Dict[
         return []
     out = []
     now = iso_epoch(snap["collected_at"])
+    # Counters reset at every reboot. A rule with zero hits is only disabled by a live command when the
+    # counters are known to cover at least the stale period; otherwise the command stays commented out.
+    since = snap.get("counter_since")
+    long_window = bool(since) and now - int(since) >= stale_days * 86400
+    if long_window:
+        window = ""
+    elif since:
+        window = f" Counters cover only {max(0, int((now - int(since)) // 86400))} days, so confirm before disabling."
+    else:
+        window = " The counter period is unknown, so confirm before disabling."
     for p in snap["policies"]:
         if p["status"] != "enable":
             continue
@@ -299,8 +314,8 @@ def check_usage(snap: Dict[str, Any], stale_days: int, today: str) -> List[Dict[
             continue
         if h["hit_count"] == 0:
             if p["action"] in PERMIT:
-                out.append(finding("UNUSED", policyid=p["policyid"], detail=f"{label(p)}: 0 hits.",
-                    cli=disable_cli(p, "zero hits", today)))
+                out.append(finding("UNUSED", policyid=p["policyid"], detail=f"{label(p)}: 0 hits.{window}",
+                    cli=disable_cli(p, "zero hits", today), cli_safe=long_window))
             else:
                 out.append(finding("UNUSED_DENY", policyid=p["policyid"], detail=f"{label(p)}: 0 hits."))
         elif h["last_used"] and now - h["last_used"] > stale_days * 86400:
@@ -359,12 +374,13 @@ def check_admin(snap: Dict[str, Any]) -> List[Dict[str, Any]]:
         clean = [x for x in aa if x not in ("telnet", "http")]  # one fix per interface for both findings
         fix = ["config system interface", f"    edit {q(name)}", f"        set allowaccess {' '.join(clean) or 'ping'}",
                "    next", "end"]
+        # commented out: the command changes how the firewall can be managed
         if "telnet" in aa:
             out.append(finding("ADMIN_TELNET", obj=name, detail=f"Interface {name} allows: {' '.join(aa)}.",
-                               cli=fix, cli_scope="global"))
+                               cli=fix, cli_scope="global", cli_safe=False))
         if "http" in aa:
             out.append(finding("ADMIN_HTTP", obj=name, detail=f"Interface {name} allows: {' '.join(aa)}.",
-                               cli=fix, cli_scope="global"))
+                               cli=fix, cli_scope="global", cli_safe=False))
     for a in admins.values():
         if not a["trusthosts"]:
             out.append(finding("ADMIN_NO_TRUSTHOST", obj=a["name"],

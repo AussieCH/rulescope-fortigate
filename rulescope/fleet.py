@@ -31,7 +31,7 @@ from concurrent.futures import ThreadPoolExecutor
 from html import escape
 from typing import Any, Callable, Dict, List, Optional
 
-from . import __version__, checks, diff, firmware, notify, report, source
+from . import __version__, checks, diff, firmware, net, notify, report, source
 from .catalog import CHECKS, SEV_LABEL, SEVERITY_ORDER
 from .ui import CONTROLS, THEME_HEAD, THEME_JS, html_open
 
@@ -55,13 +55,17 @@ def load_inventory(path: str) -> List[Dict[str, Any]]:
                 "timeout": int(o.get("timeout", "30")), "usage": o.get("usage"), "usage_since": o.get("usage_since"),
                 "label": o.get("label", sec), "group": o.get("group", ""),
                 "backup": o.get("backup", "yes").lower() in TRUE, "events": o.get("events", "yes").lower() in TRUE,
-                "wan": o.get("wan"), "not_wan": o.get("not_wan"),
+                "wan": o.get("wan"), "not_wan": o.get("not_wan"), "pin_sha256": o.get("pin_sha256"),
             }
             if not dev["host"] and not dev["config"]:
                 raise ValueError(f"[{sec}] needs 'host' or 'config'")
+            if dev["pin_sha256"]:
+                net.normalize_pin(dev["pin_sha256"])  # a mistyped pin fails here, not in the middle of a run
             devices.append(dev)
-    names = [d["name"] for d in devices]
-    dup = {n for n in names if names.count(n) > 1}
+    # devices are stored under their folder name, so two names that map to one folder would share
+    # snapshots and reports ("HQ FW" and "HQ_FW")
+    names = [source.safe_name(d["name"]) for d in devices]
+    dup = {d["name"] for d in devices if names.count(source.safe_name(d["name"])) > 1}
     if dup:
         raise ValueError(f"duplicate device names: {', '.join(sorted(dup))}")
     return devices
@@ -87,6 +91,29 @@ def _write(path: str, text: str) -> None:
         fh.write(text)
 
 
+ALERT_DAYS = 7  # how long a risky-change alert stays on the dashboard
+
+
+def _recent_alerts(path: str, new: List[str], now_iso: str) -> List[Dict[str, str]]:
+    """Alerts of the last ALERT_DAYS days, newest first. Each run only sees the changes since the
+    previous one, so without this an alert would disappear from the dashboard after one run."""
+    items: List[Dict[str, str]] = []
+    try:
+        with open(path, encoding="utf-8") as fh:
+            items = [x for x in json.load(fh) if isinstance(x, dict) and x.get("t") and x.get("a")]
+    except (OSError, ValueError, TypeError):
+        items = []
+    try:
+        cutoff = (_dt.datetime.fromisoformat(now_iso) - _dt.timedelta(days=ALERT_DAYS)).isoformat()
+    except ValueError:
+        cutoff = ""
+    items = [x for x in items if str(x["t"]) >= cutoff] + [{"t": now_iso, "a": a} for a in new]
+    if items or os.path.exists(path):
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(items[-200:], fh)
+    return list(reversed(items[-200:]))
+
+
 def audit_device(dev: Dict[str, Any], out_dir: str, snap_dir: str, stale_days: int = 90, baseline_days: int = 30,
                  auditor: str = "", notifier: Optional[Callable[[str, List[str], int], None]] = None,
                  advisor: Optional[firmware.AdvisoryClient] = None, lifecycle: Optional[Dict[str, Any]] = None,
@@ -102,7 +129,7 @@ def audit_device(dev: Dict[str, Any], out_dir: str, snap_dir: str, stale_days: i
                                     token=token, insecure=dev["insecure"], ca_file=dev.get("ca_file"),
                                     timeout=dev["timeout"], with_backup=dev.get("backup", True),
                                     with_events=dev.get("events", True), usage=dev.get("usage"),
-                                    usage_since=dev.get("usage_since"))
+                                    usage_since=dev.get("usage_since"), pin_sha256=dev.get("pin_sha256"))
         if dev.get("wan"):
             snap["wan_override"] = [x.strip() for x in dev["wan"].split(",") if x.strip()]
         if dev.get("not_wan"):
@@ -135,11 +162,13 @@ def audit_device(dev: Dict[str, Any], out_dir: str, snap_dir: str, stale_days: i
                 _write(os.path.join(ddir, "changes.html"), page)
                 stamp = os.path.basename(path)[:-5]
                 _write(os.path.join(ddir, f"changes-{stamp}.html"), page)
-            if alerts and notifier:
-                try:
-                    notifier(dev["name"], alerts, changes)
-                except Exception as e:  # notification failure must not fail the audit
-                    row["notify_error"] = str(e)
+        if notifier:
+            # alerts that could not be sent stay on disk and go out with the next run
+            err = notify.deliver(os.path.join(ddir, "pending-alerts.json"),
+                                 lambda todo: notifier(dev["name"], todo, changes), alerts)
+            if err:  # a notification failure must not fail the audit, but it must be visible
+                row["notify_error"] = err
+        recent = _recent_alerts(os.path.join(ddir, "recent-alerts.json"), alerts, res["collected_at"])
         bp, fw = res["practices"], res["firmware"]
         hist = _history(os.path.join(ddir, "history.json"),
                         {"t": res["collected_at"], "score": res["score"], "grade": res["grade"], "bp": bp["percent"],
@@ -150,7 +179,7 @@ def audit_device(dev: Dict[str, Any], out_dir: str, snap_dir: str, stale_days: i
             "status": "ok", "hostname": dv.get("hostname"), "model": dv.get("model"), "version": dv.get("version"),
             "score": res["score"], "grade": res["grade"], "areas": res["areas"], "sev": res["severity_counts"],
             "exposed": report.internet_services(res), "risky": res["stats"].get("exposed_risky", 0),
-            "cleanup": res["cleanup"]["percent"], "changes": changes, "alerts": alerts,
+            "cleanup": res["cleanup"]["percent"], "changes": changes, "alerts": alerts, "recent_alerts": recent,
             "prev_score": hist[-2]["score"] if len(hist) >= 2 else None,
             "trend": [h["score"] for h in hist[-30:]], "checks": sorted({f["check"] for f in res["findings"]}),
             "has_changes_page": os.path.exists(os.path.join(ddir, "changes.html")),
@@ -270,7 +299,13 @@ def dashboard(summary: Dict[str, Any], palette: str = "harbor") -> str:
         ver_rows.append(f'<tr><td class="mono">{e(v)}</td><td><span class="pill {cls}">{e(txt)}</span></td>'
                         f'<td class="mono">{e(eos)}</td><td>{cves}</td><td class="num">{n}</td>'
                         f'<td>{e(", ".join(r["name"] for r in ok if (r.get("version") or "?") == v))}</td></tr>')
-    alert_rows = "".join(f'<tr><td>{e(r["label"])}</td><td>{e(a)}</td></tr>' for r in ok for a in r.get("alerts", []))
+    def recent(r: Dict[str, Any]) -> List[Dict[str, str]]:  # summaries written before 0.4.1 have no history
+        return r.get("recent_alerts") or [{"t": r.get("when", ""), "a": a} for a in r.get("alerts", [])]
+
+    alert_rows = "".join(f'<tr><td>{e(r["label"])}</td><td class="mono">{e(str(x.get("t", ""))[:16].replace("T", " "))}</td>'
+                         f'<td>{e(x.get("a"))}</td></tr>' for r in ok for x in recent(r))
+    notify_rows = "".join(f'<tr><td>{e(r["label"])}</td><td>{e(r.get("notify_error"))}</td></tr>'
+                          for r in ok if r.get("notify_error"))
     err_rows = "".join(f'<tr><td>{e(r["label"])}</td><td class="mono">{e(r["host"])}</td><td>{e(r.get("error"))}</td></tr>' for r in bad)
     css = report.CSS + """.num{text-align:right;font-variant-numeric:tabular-nums}th[data-sort]{cursor:pointer}
 th[data-sort]:hover{color:var(--link)}.wrap{max-width:1400px}.wrap .kpis{grid-template-columns:repeat(4,minmax(0,1fr))}
@@ -295,7 +330,8 @@ vc=c.dataset.v!==undefined?+c.dataset.v:c.textContent.trim();return (va>vc?1:va<
 <div style="--c:var(--sev-high)"><div class="n">{exploited}</div><div class="l">Devices with exploited CVEs</div></div>
 <div style="--c:var(--a-exposure)"><div class="n">{sum(r['exposed'] for r in ok)}</div><div class="l">Internet-exposed services</div></div>
 <div style="--c:var(--sev-medium)"><div class="n">{n_alerts}</div><div class="l">Risky-change alerts ({changed} devices changed)</div></div></div>
-{('<h2>Alerts</h2><table><thead><tr><th>Device</th><th>Alert</th></tr></thead><tbody>' + alert_rows + '</tbody></table>') if alert_rows else ''}
+{('<h2>Alerts</h2><p class="dim">Risky changes of the last ' + str(ALERT_DAYS) + ' days.</p><table><thead><tr><th>Device</th><th>Seen (UTC)</th><th>Alert</th></tr></thead><tbody>' + alert_rows + '</tbody></table>') if alert_rows else ''}
+{('<h2>Notifications not delivered</h2><p class="dim">These alerts are kept and sent again with the next run.</p><table><thead><tr><th>Device</th><th>Error</th></tr></thead><tbody>' + notify_rows + '</tbody></table>') if notify_rows else ''}
 <h2>Devices</h2><div class="tw"><table class="exp"><thead><tr>{th}</tr></thead><tbody>{''.join(trs)}</tbody></table></div>
 <h2>FortiOS versions</h2><table><thead><tr><th>Version</th><th>Lifecycle</th><th>End of support</th><th>Known CVEs</th>
 <th class="num">Devices</th><th>Names</th></tr></thead><tbody>{''.join(ver_rows)}</tbody></table>

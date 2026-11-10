@@ -438,6 +438,9 @@ def finding(cid: str, *, policyid: Optional[int] = None, obj: Optional[str] = No
             detail: str = "", cli: Optional[List[str]] = None, cli_scope: str = "vdom",
             cli_safe: bool = True, severity: Optional[str] = None, url: Optional[str] = None) -> Dict[str, Any]:
     sev, area, title, why, rec = CHECKS[cid]
+    # names come from the device or from a config file someone sent: never let them carry line breaks
+    detail = one_line(detail)
+    obj = one_line(obj) if isinstance(obj, str) else obj
     f = {"check": cid, "severity": severity or sev, "area": area, "category": AREAS[area][0],
          "title": title, "why": why, "recommendation": rec, "policyid": policyid, "uuid": None,
          "object": obj, "detail": detail, "cli": cli or [], "cli_scope": cli_scope, "cli_safe": cli_safe,
@@ -447,8 +450,17 @@ def finding(cid: str, *, policyid: Optional[int] = None, obj: Optional[str] = No
     return f
 
 
+def one_line(s: Any) -> str:
+    """Text for a single output line: line breaks and other control characters become spaces.
+
+    FortiOS names read from an untrusted config backup may contain line breaks. Written into the
+    remediation script unchanged, a line break would end a comment or a quoted value and turn the
+    rest of the name into a live command."""
+    return "".join(c if c.isprintable() else " " for c in str(s))
+
+
 def q(s: str) -> str:
-    return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
+    return '"' + one_line(s).replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
 def label(p: Dict[str, Any]) -> str:

@@ -15,6 +15,7 @@ import urllib.parse
 import urllib.request
 from typing import Any, Dict, List, Optional, Tuple
 
+from . import net
 from .usage import to_epoch
 
 
@@ -27,12 +28,15 @@ class ApiError(Exception):
             404: "endpoint not available on this FortiOS version",
             405: "method not allowed on this FortiOS version",
         }.get(status, "")
+        if 300 <= status < 400:
+            hint = ("the address answers with a redirect; rulescope never follows redirects, so the API token "
+                    "is not sent to another host - check the host and admin port")
         super().__init__(f"HTTP {status} on {path}" + (f": {hint}" if hint else "") + (f" ({detail})" if detail else ""))
 
 
 # attr[old->new] or attr[old]->[new]: mask every bracketed value that belongs to a secret-looking attribute
-_SECRET_RE = re.compile(r"([\w.-]*(?:passw|psk|secret|key|token|private)[\w.-]*)\[[^\]]*\](?:\s*->\s*\[[^\]]*\])?",
-                        re.I)
+_SECRET_RE = re.compile(r"([\w.-]*(?:passw|pwd|passphrase|psk|secret|key|token|private|community|credential)[\w.-]*)"
+                        r"\[[^\]]*\](?:\s*->\s*\[[^\]]*\])?", re.I)
 
 
 def _sanitize(s: Any, limit: int) -> str:
@@ -77,16 +81,19 @@ def normalize_event(e: Dict[str, Any]) -> Dict[str, Any]:
 
 class FortiGateAPI:
     def __init__(self, host: str, token: str, port: int = 443, vdom: str = "root",
-                 verify: bool = True, ca_file: Optional[str] = None, timeout: int = 30):
+                 verify: bool = True, ca_file: Optional[str] = None, timeout: int = 30,
+                 pin_sha256: Optional[str] = None):
+        """`pin_sha256`: SHA-256 fingerprint of the FortiGate's certificate. It replaces CA verification,
+        so a self-signed certificate is still checked on every connection (unlike verify=False)."""
         h = host.strip("[]")
         self.base = f"https://[{h}]:{port}" if ":" in h else f"https://{h}:{port}"
         self.token, self.vdom, self.timeout = token, vdom, timeout
-        if verify:
-            self.ctx = ssl.create_default_context(cafile=ca_file)
+        pin = net.normalize_pin(pin_sha256) if pin_sha256 else None
+        if pin or not verify:
+            self.ctx = net.unverified_context()
         else:
-            self.ctx = ssl.create_default_context()
-            self.ctx.check_hostname = False
-            self.ctx.verify_mode = ssl.CERT_NONE
+            self.ctx = ssl.create_default_context(cafile=ca_file)
+        self.opener = net.build_opener(self.ctx, pin)
 
     def _request(self, method: str, path: str, params: Optional[Dict[str, str]] = None,
                  body: Optional[Dict[str, Any]] = None, raw: bool = False) -> Any:
@@ -101,10 +108,11 @@ class FortiGateAPI:
         if data is not None:
             req.add_header("Content-Type", "application/json")
         try:
-            with urllib.request.urlopen(req, context=self.ctx, timeout=self.timeout) as r:
+            with self.opener.open(req, timeout=self.timeout) as r:
                 payload = r.read()
         except urllib.error.HTTPError as e:
             detail = e.read()[:200].decode(errors="replace").strip()
+            e.close()
             raise ApiError(e.code, path, detail) from None
         except urllib.error.URLError as e:
             raise ConnectionError(f"Cannot reach {self.base}: {e.reason}") from None
@@ -185,8 +193,14 @@ class FortiGateAPI:
             "router_static": ("cmdb/router/static", True, False),
             "policy_stats": ("monitor/firewall/policy", True, False),
             "webui_state": ("monitor/web-ui/state", False, False),
+            # tables rulescope does not analyze: read only to say so in the report when they hold rules
+            "security_policy": ("cmdb/firewall/security-policy", True, False),
+            "proxy_policy": ("cmdb/firewall/proxy-policy", True, False),
+            "vip6": ("cmdb/firewall/vip6", True, False),
+            "vdom_settings": ("cmdb/system/settings", True, False),
         }
-        quiet = {"admin", "api_user", "webui_state", "sdwan", "sched_onetime", "sched_group", "phase2"}
+        quiet = {"admin", "api_user", "webui_state", "sdwan", "sched_onetime", "sched_group", "phase2",
+                 "security_policy", "proxy_policy", "vip6", "vdom_settings"}
         exposure_inputs = {"vpn_ssl", "phase1", "local_in", "router_static"}
         for key, (path, scoped, meta) in optional.items():
             try:
