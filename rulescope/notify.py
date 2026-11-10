@@ -23,6 +23,8 @@ def webhook_url(url: Optional[str] = None, url_file: Optional[str] = None) -> Op
         raise ValueError("webhook URL must start with https:// or http://")
     return url
 
+from .safety import clean
+
 
 def webhook(url: str, device: str, alerts: List[str], changes: int, report_link: Optional[str] = None,
             timeout: int = 10) -> None:
@@ -73,13 +75,13 @@ def _one_line(s: str) -> str:
 
 
 def syslog(target: str, device: str, alerts: List[str]) -> None:
-    """RFC 5424 over UDP, facility local0, severity warning. target = host, host:port, IPv6 or [IPv6]:port."""
-    from .source import split_host_port
-    host, port = split_host_port(target, 514)
-    family, _, _, _, addr = socket.getaddrinfo(host, port, type=socket.SOCK_DGRAM)[0]
+    """RFC 5424 over UDP, facility local0, severity warning. target = host[:port]."""
+    host, _, port = target.partition(":")
     ts = _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds")
     me = socket.gethostname()
-    with socket.socket(family, socket.SOCK_DGRAM) as s:
+    device = clean(device).replace(" ", "_")
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
         for a in alerts:
-            msg = f"<132>1 {ts} {me} rulescope - change - device={_one_line(device)} alert=\"{_one_line(a)}\""
-            s.sendto(msg.encode()[:2048], addr)
+            a = clean(a).replace(chr(34), chr(39))  # one alert = one syslog line, no forged lines
+            msg = f"<132>1 {ts} {me} rulescope - change - device={device} alert=\"{a}\""
+            s.sendto(msg.encode()[:2048], (host, int(port or 514)))

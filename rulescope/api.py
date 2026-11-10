@@ -6,13 +6,14 @@ auditor's IP with trusted hosts. Nothing here ever writes to the device.
 from __future__ import annotations
 
 import datetime as _dt
+import hashlib
+import http.client
 import json
 import re
+import socket
 import ssl
 import time
-import urllib.error
 import urllib.parse
-import urllib.request
 from typing import Any, Dict, List, Optional, Tuple
 
 from . import net
@@ -62,15 +63,6 @@ def _event_time(e: Dict[str, Any]) -> int:
     return 0
 
 
-def _progress(resp: Dict[str, Any]) -> float:
-    """Percent complete of a log search; a missing value means done, 0 means just started."""
-    v = resp.get("completed")
-    try:
-        return 100.0 if v is None or v == "" else float(v)
-    except (TypeError, ValueError):
-        return 100.0
-
-
 def normalize_event(e: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "time": _event_time(e), "user": str(e.get("user", "")), "ui": str(e.get("ui", "")),
@@ -79,7 +71,35 @@ def normalize_event(e: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+class CertificatePinError(ConnectionError):
+    pass
+
+
+def normalize_pin(pin: str) -> str:
+    """'AB:CD:...' or 'abcd...' -> 64 lowercase hex characters."""
+    p = re.sub(r"[\s:]", "", pin or "").lower()
+    if p.startswith("sha256/") or p.startswith("sha256:"):
+        p = p[7:]
+    if not re.fullmatch(r"[0-9a-f]{64}", p):
+        raise ValueError("--pin-sha256 must be the 64-hex-digit SHA-256 fingerprint of the FortiGate certificate")
+    return p
+
+
+def cert_fingerprint(host: str, port: int = 443, timeout: int = 10) -> str:
+    """SHA-256 fingerprint of the certificate the device presents (for --pin-sha256)."""
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    with socket.create_connection((host, port), timeout=timeout) as raw:
+        with ctx.wrap_socket(raw, server_hostname=host) as tls:
+            return hashlib.sha256(tls.getpeercert(binary_form=True)).hexdigest()
+
+
 class FortiGateAPI:
+    """verify=True checks the certificate against the system CAs (or ca_file); pin_sha256 instead accepts
+    exactly one certificate, checked on every connection before the token is sent; verify=False and no pin
+    disables checking (only for a lab: anyone on the path could capture the token)."""
+
     def __init__(self, host: str, token: str, port: int = 443, vdom: str = "root",
                  verify: bool = True, ca_file: Optional[str] = None, timeout: int = 30,
                  pin_sha256: Optional[str] = None):
@@ -95,18 +115,37 @@ class FortiGateAPI:
             self.ctx = ssl.create_default_context(cafile=ca_file)
         self.opener = net.build_opener(self.ctx, pin)
 
+    def _connect(self) -> http.client.HTTPConnection:
+        u = urllib.parse.urlsplit(self.base)
+        if u.scheme == "http":  # only used by the test suite
+            conn: http.client.HTTPConnection = http.client.HTTPConnection(u.hostname, u.port or 80, timeout=self.timeout)
+            conn.connect()
+            return conn
+        conn = http.client.HTTPSConnection(u.hostname, u.port or 443, timeout=self.timeout, context=self.ctx)
+        conn.connect()
+        if self.pin:
+            der = conn.sock.getpeercert(binary_form=True)  # type: ignore[union-attr]
+            got = hashlib.sha256(der or b"").hexdigest()
+            if got != self.pin:
+                conn.close()
+                raise CertificatePinError(f"{self.base} presented certificate SHA-256 {got}, expected {self.pin}. "
+                                          "The token was not sent. If the certificate was replaced on purpose, "
+                                          "update --pin-sha256 (rulescope cert --host ...).")
+        return conn
+
     def _request(self, method: str, path: str, params: Optional[Dict[str, str]] = None,
                  body: Optional[Dict[str, Any]] = None, raw: bool = False) -> Any:
-        q = dict(params or {})
-        url = f"{self.base}/api/v2/{path}"
-        if q:
-            url += "?" + urllib.parse.urlencode(q)
+        target = f"/api/v2/{path}" + ("?" + urllib.parse.urlencode(params) if params else "")
         data = json.dumps(body).encode() if body is not None else None
-        req = urllib.request.Request(url, data=data, method=method)
-        req.add_header("Authorization", f"Bearer {self.token}")
-        req.add_header("Accept", "application/json")
+        headers = {"Authorization": f"Bearer {self.token}", "Accept": "application/json"}
         if data is not None:
-            req.add_header("Content-Type", "application/json")
+            headers["Content-Type"] = "application/json"
+        try:
+            conn = self._connect()
+        except CertificatePinError:
+            raise
+        except (OSError, ssl.SSLError, http.client.HTTPException) as e:
+            raise ConnectionError(f"Cannot reach {self.base}: {e}") from None
         try:
             with self.opener.open(req, timeout=self.timeout) as r:
                 payload = r.read()
@@ -151,7 +190,7 @@ class FortiGateAPI:
                 resp = self._request("GET", path, params)
                 tries = 0
                 while (isinstance(resp, dict) and resp.get("session_id") and tries < 10
-                       and _progress(resp) < 100):
+                       and float(resp.get("completed", 100) or 100) < 100):
                     time.sleep(0.5)
                     tries += 1
                     resp = self._request("GET", path, {**params, "session_id": str(resp["session_id"])})

@@ -10,6 +10,7 @@ from .catalog import AREAS, CHECKS, CONTROL_NAMES, EFFORT, EFFORT_LABEL, SEV_LAB
 from .net import https_only
 from .practices import DOMAINS, SOURCES, STATUS_LABEL
 from .report import _e, _grouped, _target, _ts, _worst, executive_summary, internet_services, remediation_cli
+from .safety import safe_url
 from .ui import AREA_VAR, CONTROLS, CSS, LOGO, THEME_HEAD, THEME_JS, html_open
 
 SEVS = ("high", "medium", "low", "info")

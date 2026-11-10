@@ -18,6 +18,7 @@ EnvironmentFile=-/etc/rulescope/notify.env
 # Let the web server read them by adding its user to the group: usermod -aG rulescope www-data
 UMask=0027
 ExecStart=/usr/local/bin/rulescope fleet --inventory /etc/rulescope/fleet.ini --out /var/lib/rulescope/site --snapshots /var/lib/rulescope/snapshots --auditor "Security team" --advisories online --cache-dir /var/lib/rulescope/nvd-cache
+UMask=0027
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes

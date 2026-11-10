@@ -8,7 +8,10 @@ from collections import OrderedDict
 from html import escape
 from typing import Any, Dict, List, Optional
 
+import re
+
 from .catalog import AREAS, CHECKS, EFFORT_LABEL, SEVERITY_ORDER
+from .safety import clean, clean_multiline, csv_cell
 
 
 def _e(x: Any) -> str:
@@ -82,8 +85,10 @@ def remediation_cli(result: Dict[str, Any], only: Optional[set] = None, safe_onl
             if not f["cli"] or key in seen or (safe_only and not f["cli_safe"]):
                 continue
             seen.add(key)
-            block = [f"# [{f['severity'].upper()}] {CHECKS[check][2]}: {f['detail']}"]
-            block += [ln if f["cli_safe"] else "# " + ln for ln in f["cli"]]
+            block = [f"# [{f['severity'].upper()}] {CHECKS[check][2]}: {clean(f['detail'])}"]
+            for ln in f["cli"]:
+                for phys in str(ln).splitlines() or [""]:  # comment out every physical line, never a list item
+                    block.append(phys if f["cli_safe"] else "# " + phys)
             (global_blocks if f["cli_scope"] == "global" else vdom_blocks).append("\n".join(block))
     if not vdom_blocks and not global_blocks:
         return "\n".join(lines + ["# No remediation commands generated."]) + "\n"
@@ -96,11 +101,31 @@ def remediation_cli(result: Dict[str, Any], only: Optional[set] = None, safe_onl
             lines.append("end\n")
     if vdom_blocks:
         if multi:
-            lines += ["config vdom", f"edit {dev.get('vdom', 'root')}"]
+            lines += ["config vdom", f"edit {clean(dev.get('vdom', 'root')).replace(' ', '_')}"]
         lines += [b + "\n" for b in vdom_blocks]
         if multi:
             lines += ["next", "end"]
-    return "\n".join(lines) + "\n"
+    return guard_script("\n".join(lines) + "\n")
+
+
+# The only statements rulescope ever generates. Anything else in a script line means the input was
+# crafted to inject commands, so the line is disabled and the script says so at the top.
+_ALLOWED = re.compile(r"^\s*(?:config|edit|set|unset|append|next|end|move|delete)(?:\s|$)")
+
+
+def guard_script(text: str) -> str:
+    out, blocked = [], 0
+    for ln in text.split("\n"):
+        ln = clean(ln)
+        if ln.strip() and not ln.lstrip().startswith("#") and not _ALLOWED.match(ln):
+            out.append("# BLOCKED, unexpected statement: " + ln)
+            blocked += 1
+        else:
+            out.append(ln)
+    if blocked:
+        out.insert(0, f"# WARNING: {blocked} unexpected line(s) were blocked. The input may have been crafted; "
+                      "do not apply this script without reading it.")
+    return "\n".join(out)
 
 
 # ---------------------------------------------------------------- CSV
@@ -171,7 +196,7 @@ def console_summary(result: Dict[str, Any]) -> str:
             out.append(f"           ... {len(items) - 5} more")
     for n in result.get("notes", []):
         out.append(f"note: {n}")
-    return "\n".join(out)
+    return clean_multiline("\n".join(out))
 
 
 # ---------------------------------------------------------------- HTML

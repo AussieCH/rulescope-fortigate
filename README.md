@@ -43,7 +43,7 @@ python3 -m pip install .          # or: pipx install .
 rulescope --version
 ```
 
-No install needed: `python3 -m rulescope ...` from this folder, or the single-file build: `python3 rulescope-0.4.0.pyz ...`.
+No install needed: `python3 -m rulescope ...` from this folder, or the single-file build: `python3 rulescope-0.4.1.pyz ...`.
 
 ## 1. Read-only API user on the FortiGate
 
@@ -86,7 +86,7 @@ install -m 600 /dev/null ~/.rulescope-token && nano ~/.rulescope-token
 
 ## 2. Audit one firewall
 
-Live (hit counters, change log):
+Live (hit counters, change log). The FortiGate's admin certificate is usually self-signed, so pin it: rulescope then talks only to the device with exactly that certificate and never sends the token anywhere else.
 
 ```bash
 # once: the SHA-256 fingerprint of the FortiGate's (self-signed) certificate
