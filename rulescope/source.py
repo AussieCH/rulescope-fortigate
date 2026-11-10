@@ -46,7 +46,7 @@ def take_snapshot(*, host: Optional[str] = None, config: Optional[str] = None, p
                   vdom: str = "root", token: Optional[str] = None, insecure: bool = False,
                   ca_file: Optional[str] = None, timeout: int = 30, with_backup: bool = True,
                   with_events: bool = True, usage: Optional[str] = None,
-                  usage_since: Optional[str] = None) -> Dict[str, Any]:
+                  usage_since: Optional[str] = None, pin_sha256: Optional[str] = None) -> Dict[str, Any]:
     if config:
         with open(config, encoding="utf-8", errors="replace") as fh:
             snap = model.from_config(fh.read(), vdom=vdom)
@@ -56,7 +56,8 @@ def take_snapshot(*, host: Optional[str] = None, config: Optional[str] = None, p
         if not token:
             raise ValueError("no API token (token file, token environment variable or RULESCOPE_TOKEN)")
         h, p = split_host_port(host, port)
-        api = FortiGateAPI(h, token, port=p, vdom=vdom, verify=not insecure, ca_file=ca_file, timeout=timeout)
+        api = FortiGateAPI(h, token, port=p, vdom=vdom, verify=not insecure, ca_file=ca_file, timeout=timeout,
+                           pin_sha256=pin_sha256)
         snap = model.from_api(api.collect_raw(with_backup=with_backup, with_events=with_events), vdom=vdom)
     if usage:
         since = usage_mod.to_epoch(usage_since) if usage_since else None
@@ -65,7 +66,23 @@ def take_snapshot(*, host: Optional[str] = None, config: Optional[str] = None, p
 
 
 def safe_name(s: str) -> str:
-    return re.sub(r"[^A-Za-z0-9._-]", "_", s) or "fortigate"
+    """A single path component: no separators, and never '.', '..' or a hidden name (the text can be
+    a hostname read from a config file someone sent)."""
+    return re.sub(r"[^A-Za-z0-9._-]", "_", s).lstrip(".") or "fortigate"
+
+
+def _other_device(directory: str, snap: Dict[str, Any]) -> bool:
+    """True if the newest snapshot in `directory` is from a device with a different serial number."""
+    serial = (snap.get("device") or {}).get("serial")
+    files = list_snapshots(directory)
+    if not serial or not files:
+        return False
+    try:
+        with open(files[-1], encoding="utf-8") as fh:
+            other = (json.load(fh).get("device") or {}).get("serial")
+    except (OSError, ValueError, AttributeError):
+        return False
+    return bool(other) and other != serial
 
 
 def device_dir(snap: Dict[str, Any], base: str, name: Optional[str] = None) -> str:
@@ -78,6 +95,9 @@ def device_dir(snap: Dict[str, Any], base: str, name: Optional[str] = None) -> s
 
 def save_snapshot(snap: Dict[str, Any], base: str, name: Optional[str] = None) -> str:
     d = device_dir(snap, base, name)
+    if name is None and _other_device(d, snap):
+        # two firewalls share a hostname: keep their histories apart, or diffs would compare the two
+        d = f"{d}_{safe_name(str(snap['device']['serial']))}"
     os.makedirs(d, exist_ok=True)
     while True:  # millisecond stamps keep names unique and in chronological sort order
         # UTC, so names keep sorting chronologically when local clocks go back (DST)

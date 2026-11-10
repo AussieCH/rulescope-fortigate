@@ -89,10 +89,15 @@ install -m 600 /dev/null ~/.rulescope-token && nano ~/.rulescope-token
 Live (hit counters, change log):
 
 ```bash
-rulescope audit --host 192.0.2.1 --token-file ~/.rulescope-token --insecure \
+# once: the SHA-256 fingerprint of the FortiGate's (self-signed) certificate
+openssl s_client -connect 192.0.2.1:443 </dev/null 2>/dev/null | openssl x509 -noout -fingerprint -sha256
+
+rulescope audit --host 192.0.2.1 --token-file ~/.rulescope-token --pin-sha256 AA:BB:...:FF \
   --client "Home lab" --auditor "Your Name" \
   --html report.html --cli fix.txt --csv findings.csv --save-snapshot snapshots
 ```
+
+With a certificate from your own CA use `--ca-file ca.pem` instead of the pin. `--insecure` skips verification and exposes the API token to anyone on the path.
 
 Offline, from a config backup (no device access):
 
@@ -112,7 +117,8 @@ Useful options:
 | `--palette forest` | Default palette of the report: `harbor`, `forest`, `ocean`, `graphite`, `contrast`. Readers can still switch it, and light/dark. |
 | `--practices-csv baseline.csv` | The best-practice baseline as a spreadsheet with owner and target-date columns |
 | `--fail-on high` | Exit code 2 when anything at that severity or above is found (cron/CI) |
-| `--host 192.0.2.1:8443`, `--vdom DMZ`, `--ca-file` | Non-default admin port, other VDOM, proper certificate verification |
+| `--host 192.0.2.1:8443`, `--vdom DMZ` | Non-default admin port, other VDOM |
+| `--pin-sha256 FINGERPRINT` / `--ca-file ca.pem` | Verify the FortiGate certificate: pin a self-signed one, or check it against your CA |
 
 ## 3. Usage data that survives reboots
 
@@ -191,8 +197,15 @@ Every run compares each device with its previous snapshot. These changes raise a
 - strong-crypto disabled, static-key ciphers enabled, admin TLS weakened, admin idle timeout raised above 15 minutes
 - Password policy, NTP, scheduled FortiGuard updates or private data encryption disabled; USB auto-install enabled
 - SSL-VPN settings changed
+- A local-in deny policy removed, or a local-in policy changed
+- A deny rule for traffic from the internet removed or disabled, or a rule from the internet moved in the sequence
+- An address, service or VIP object (or group) changed that an inbound rule uses
 
-Send alerts anywhere with `--webhook URL` (JSON with a `text` field, which Slack, Mattermost and workflow-style webhooks accept) and/or `--syslog host:514` (RFC 5424, so the SIEM can alert too). Single device: `rulescope collect ... --diff --webhook URL`.
+The diff also lists changes to zones, VIP groups and local-in policies.
+
+Send alerts anywhere with a webhook (JSON with a `text` field, which Slack, Mattermost and workflow-style webhooks accept) and/or `--syslog host:514` (RFC 5424, so the SIEM can alert too). Give the webhook URL with `--webhook-file FILE` or the `RULESCOPE_WEBHOOK` environment variable; `--webhook URL` works too, but puts the URL in the process list. Single device: `rulescope collect ... --diff --webhook-file FILE`.
+
+Alerts are not lost when delivery fails: undelivered alerts are kept on disk and sent again with the next run, the dashboard lists the failure, and the command exits with code 4. The dashboard shows the alerts of the last 7 days.
 
 With API access, each change shows who made it (user, GUI/CLI/API and source IP, time), taken from the FortiGate's system event log. Values of password, PSK and key attributes are masked before anything is stored.
 
@@ -204,7 +217,8 @@ With API access, each change shows who made it (user, GUI/CLI/API and source IP,
 - **Comparisons are fair across versions.** "Progress since" only compares checks that both runs evaluated, so new checks in a newer rulescope, or data an older token could not read, never show up as "new" findings.
 - **Internet-facing interfaces** = WAN role ∪ SD-WAN members ∪ default-route egress interfaces ∪ DHCP/PPPoE clients ∪ VIP external interfaces. IPsec tunnels and interfaces whose role is explicitly `lan` or `dmz` are never picked by these guesses, so a default route to an upstream internal network is not misread as the internet. The console and the report list each interface with the reason it was chosen; correct it with `--wan` / `--not-wan`.
 - **Coverage findings** are reported only when provable. FQDN, geography, wildcard, ISDB and VIP objects are treated conservatively. The index that makes this fast is verified against brute force in the tests: 10,000 rules take under a second.
-- **Remediation script.** Rules are disabled (not deleted) with a dated comment. Anything that changes allowed traffic, VPN peers or management reachability is commented out.
+- **Remediation script.** Rules are disabled (not deleted) with a dated comment. Anything that changes allowed traffic, VPN peers or management reachability is commented out, including the removal of Telnet or HTTP from an interface. A zero-hit rule gets a live disable command only when the counters are known to cover at least `--stale-days`; after a recent reboot, or when the period is unknown, the command is commented out.
+- **Not assessed, never a pass.** When an input could not be read (a token without permission, or a partial backup without `config system global`), the practices that depend on it are "Not assessed". This covers interface, SSL-VPN, IPsec and local-in settings and API users. NTP is "Not assessed" when a backup does not set `ntpsync` explicitly, because its default differs between FortiOS versions.
 - **Compliance references** help an auditor find the right control. They are not a certification.
 
 ## Remote audit kit (for the audit service)
@@ -226,10 +240,20 @@ For the follow-up audit, add `--baseline` with the first snapshot: the report th
 
 The API token is read-only and restricted to one source IP by trusted hosts. Snapshots never contain the raw config, password hashes, PSKs or keys, and are written with mode 600. Reports and dashboards are sensitive: they list weaknesses.
 
+- **TLS.** Verify the FortiGate certificate with `--ca-file`, or pin a self-signed certificate with `--pin-sha256` (fleet inventory: `pin_sha256 =`). The pin is checked on every connection before the token is sent. Get the fingerprint once, over a path you trust: `openssl s_client -connect 192.0.2.1:443 </dev/null 2>/dev/null | openssl x509 -noout -fingerprint -sha256`. `--insecure` switches verification off, so anyone on the path can read the token; keep it for a first test in a lab.
+- **Redirects are never followed**, so the API token, the NVD key and alert texts only go to the host you configured.
+- **Config backups are untrusted input.** A backup a client sends can contain crafted names. Spreadsheet cells that start with `=`, `+`, `-` or `@` are prefixed with `'`, and only `https` URLs become links in the report. Always review `fix.txt` before applying it.
+- **File permissions.** Reports written by `audit`, `analyze` and `diff` are mode 600. The systemd units set `UMask=0027`; add the web server user to the `rulescope` group to serve the fleet site.
+- **Webhook URLs are secrets.** Use `--webhook-file` or `RULESCOPE_WEBHOOK` instead of `--webhook`, which shows up in the process list.
+
 ## Limits (v0.4)
 
 - IPv4 coverage math; IPv6 addresses in unified policies are compared by name.
-- Firewall policies, local-in policies, VPN and system settings; proxy and DoS policies are not analyzed yet.
+- Firewall policies, local-in policies, VPN and system settings; proxy and DoS policies are not analyzed yet. Security policies (NGFW policy-based mode), IPv6 policies of FortiOS before 6.4 and IPv6 virtual IPs are not analyzed either: when a device has any, the report says so in its notes instead of showing a clean rule base.
+- Rules that use negated addresses, services or internet services are left out of shadow and redundancy detection.
+- A static route to a named address or internet service is not treated as a default route.
+- A source counts as "anyone" when it is `all`, negated, or covers a /8 or more of public address space (this includes groups built as "everything except ...").
+- A local-in deny only counts as protection when it is always active, has no negated field, applies to every source and its destination is `all` or contains the interface address.
 - Security profiles are checked for presence and botnet blocking, not for full quality (an IPS sensor in monitor mode still counts as IPS).
 - Partial overlaps (rule B only partly covered by A) are not reported, only full coverage.
 - Config backups omit default values. rulescope fills in FortiOS defaults where they are known for the version; where a default differs between versions and is not known (for example admin TLS versions before 7.0), the setting is marked not assessed instead of guessed.

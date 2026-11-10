@@ -7,8 +7,16 @@ After=network-online.target
 Type=oneshot
 User=rulescope
 Group=rulescope
-# Edit the host. Add --port, --vdom or --ca-file as needed.
-ExecStart=/usr/local/bin/rulescope collect --host 192.168.1.99 --token-file /etc/rulescope/token --insecure --out /var/lib/rulescope/snapshots --diff
+# Edit the host. Add --port or --vdom as needed.
+# TLS: replace the fingerprint with the SHA-256 fingerprint of the FortiGate certificate
+#   openssl s_client -connect 192.168.1.99:443 </dev/null 2>/dev/null | openssl x509 -noout -fingerprint -sha256
+# or use --ca-file when the certificate comes from your own CA. Do not use --insecure for a scheduled job:
+# it lets anyone on the path read the API token.
+# Alerts: put RULESCOPE_WEBHOOK=https://... in /etc/rulescope/notify.env (mode 600) and/or add --syslog host:514.
+EnvironmentFile=-/etc/rulescope/notify.env
+ExecStart=/usr/local/bin/rulescope collect --host 192.168.1.99 --token-file /etc/rulescope/token --pin-sha256 REPLACE_WITH_CERTIFICATE_FINGERPRINT --out /var/lib/rulescope/snapshots --diff
+# files are readable by the rulescope user and group only
+UMask=0027
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes

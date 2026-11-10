@@ -10,8 +10,16 @@ from typing import Any, Dict, List, Optional
 
 from .catalog import AREAS, CHECKS, EFFORT_LABEL, SEVERITY_ORDER
 
+
 def _e(x: Any) -> str:
     return escape("" if x is None else str(x))
+
+
+def _cell(v: Any) -> Any:
+    """A CSV cell that a spreadsheet will not run as a formula (names come from the device)."""
+    if isinstance(v, str) and v[:1] in ("=", "+", "-", "@", "\t", "\r"):
+        return "'" + v
+    return v
 
 
 def _ts(epoch: Optional[int], fmt: str = "%Y-%m-%d") -> str:
@@ -103,9 +111,10 @@ def findings_csv(result: Dict[str, Any]) -> str:
     w.writerow(["severity", "check", "title", "area", "effort", "policy_id", "object", "detail", "recommendation",
                 "compliance", "reference", "owner", "status", "notes"])
     for f in result["findings"]:
-        w.writerow([f["severity"], f["check"], f["title"], f["category"], EFFORT_LABEL.get(f.get("effort", ""), ""),
-                    f["policyid"] if f["policyid"] is not None else "", f["object"] or "", f["detail"], f["recommendation"],
-                    "; ".join(f.get("compliance", [])), f.get("url", ""), "", "", ""])
+        w.writerow([_cell(c) for c in (
+            f["severity"], f["check"], f["title"], f["category"], EFFORT_LABEL.get(f.get("effort", ""), ""),
+            f["policyid"] if f["policyid"] is not None else "", f["object"] or "", f["detail"], f["recommendation"],
+            "; ".join(f.get("compliance", [])), f.get("url", ""), "", "", "")])
     return "﻿" + buf.getvalue()  # BOM so Excel opens UTF-8 (Hebrew names) correctly
 
 
@@ -114,7 +123,8 @@ def practices_csv(result: Dict[str, Any]) -> str:
     w = csv.writer(buf)
     w.writerow(["id", "domain", "practice", "sources", "status", "evidence", "related_checks", "owner", "target_date", "notes"])
     for i in (result.get("practices") or {}).get("items", []):
-        w.writerow([i["id"], i["domain"], i["title"], i["sources"], i["status"], i["evidence"], "; ".join(i["checks"]), "", "", ""])
+        w.writerow([_cell(c) for c in (i["id"], i["domain"], i["title"], i["sources"], i["status"], i["evidence"],
+                                       "; ".join(i["checks"]), "", "", "")])
     return "\ufeff" + buf.getvalue()
 
 
